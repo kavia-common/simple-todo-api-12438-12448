@@ -1,12 +1,13 @@
 #!/bin/bash
 
 # Minimal PostgreSQL startup script with full paths
-DB_NAME="myapp"
-DB_USER="appuser"
-DB_PASSWORD="dbuser123"
-DB_PORT="5000"
+# Allow overrides via environment variables; defaults chosen to align with container expectations
+DB_NAME="${DB_NAME:-myapp}"
+DB_USER="${DB_USER:-appuser}"
+DB_PASSWORD="${DB_PASSWORD:-dbuser123}"
+DB_PORT="${DB_PORT:-5001}"
 
-echo "Starting PostgreSQL setup..."
+echo "Starting PostgreSQL setup on port ${DB_PORT}..."
 
 # Find PostgreSQL version and set paths
 PG_VERSION=$(ls /usr/lib/postgresql/ | head -1)
@@ -59,17 +60,28 @@ sudo -u postgres ${PG_BIN}/postgres -D /var/lib/postgresql/data -p ${DB_PORT} &
 
 # Wait for PostgreSQL to start
 echo "Waiting for PostgreSQL to start..."
-sleep 5
+# Initial grace period
+sleep 3
 
-# Check if PostgreSQL is running
-for i in {1..15}; do
+# Check if PostgreSQL is running with timeout and clear error if not
+READY=0
+for i in {1..20}; do
     if sudo -u postgres ${PG_BIN}/pg_isready -p ${DB_PORT} > /dev/null 2>&1; then
         echo "PostgreSQL is ready!"
+        READY=1
         break
     fi
-    echo "Waiting... ($i/15)"
+    echo "Waiting... ($i/20)"
     sleep 2
 done
+
+if [ "${READY}" -ne 1 ]; then
+    echo "ERROR: PostgreSQL failed to become ready on port ${DB_PORT}."
+    echo "Troubleshooting tips:"
+    echo "- Ensure the port ${DB_PORT} is free: ss -ltnp | grep :${DB_PORT}"
+    echo "- Check PostgreSQL logs or container logs for detailed errors."
+    exit 1
+fi
 
 # Create database and user
 echo "Setting up database and user..."
@@ -78,14 +90,14 @@ sudo -u postgres ${PG_BIN}/createdb -p ${DB_PORT} ${DB_NAME} 2>/dev/null || echo
 # Set up user and permissions with proper schema ownership
 sudo -u postgres ${PG_BIN}/psql -p ${DB_PORT} -d postgres << EOF
 -- Create user if doesn't exist
-DO \$\$
+DO \$$
 BEGIN
     IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = '${DB_USER}') THEN
         CREATE ROLE ${DB_USER} WITH LOGIN PASSWORD '${DB_PASSWORD}';
     END IF;
     ALTER ROLE ${DB_USER} WITH PASSWORD '${DB_PASSWORD}';
 END
-\$\$;
+\$$;
 
 -- Grant database-level permissions
 GRANT ALL PRIVILEGES ON DATABASE ${DB_NAME} TO ${DB_USER};
@@ -93,24 +105,17 @@ GRANT ALL PRIVILEGES ON DATABASE ${DB_NAME} TO ${DB_USER};
 -- Connect to the specific database for schema-level permissions
 \c ${DB_NAME}
 
--- For PostgreSQL 15+, we need to handle public schema permissions differently
--- First, grant usage on public schema
+-- For PostgreSQL 15+, handle public schema permissions
 GRANT USAGE ON SCHEMA public TO ${DB_USER};
-
--- Grant CREATE permission on public schema
 GRANT CREATE ON SCHEMA public TO ${DB_USER};
 
--- Make the user owner of all future objects they create in public schema
+-- Default privileges for future objects
 ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO ${DB_USER};
 ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON SEQUENCES TO ${DB_USER};
 ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON FUNCTIONS TO ${DB_USER};
 ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TYPES TO ${DB_USER};
 
--- If you want the user to be able to create objects without restrictions,
--- you can make them the owner of the public schema (optional but effective)
--- ALTER SCHEMA public OWNER TO ${DB_USER};
-
--- Alternative: Grant all privileges on schema public to the user
+-- Also grant all on schema public to the user
 GRANT ALL ON SCHEMA public TO ${DB_USER};
 
 -- Ensure the user can work with any existing objects
