@@ -14,6 +14,28 @@ PG_BIN="/usr/lib/postgresql/${PG_VERSION}/bin"
 
 echo "Found PostgreSQL version: ${PG_VERSION}"
 
+apply_schema_and_seed() {
+  echo "Applying database schema..."
+  if [ -f "schema.sql" ]; then
+    sudo -u postgres ${PG_BIN}/psql -p ${DB_PORT} -d ${DB_NAME} -f schema.sql || {
+      echo "Failed to apply schema.sql"
+      exit 1
+    }
+  else
+    echo "schema.sql not found, skipping."
+  fi
+
+  echo "Applying seed data (if any)..."
+  if [ -f "seed.sql" ]; then
+    sudo -u postgres ${PG_BIN}/psql -p ${DB_PORT} -d ${DB_NAME} -f seed.sql || {
+      echo "Failed to apply seed.sql"
+      exit 1
+    }
+  else
+    echo "seed.sql not found, skipping."
+  fi
+}
+
 # Check if PostgreSQL is already running on the specified port
 if sudo -u postgres ${PG_BIN}/pg_isready -p ${DB_PORT} > /dev/null 2>&1; then
     echo "PostgreSQL is already running on port ${DB_PORT}!"
@@ -21,16 +43,43 @@ if sudo -u postgres ${PG_BIN}/pg_isready -p ${DB_PORT} > /dev/null 2>&1; then
     echo "User: ${DB_USER}"
     echo "Port: ${DB_PORT}"
     echo ""
+    echo "Ensuring database, user, permissions, and schema exist..."
+
+    # Create database, user, and permissions idempotently, then apply schema/seed
+    sudo -u postgres ${PG_BIN}/createdb -p ${DB_PORT} ${DB_NAME} 2>/dev/null || true
+    sudo -u postgres ${PG_BIN}/psql -p ${DB_PORT} -d postgres << EOF
+DO \$\$
+BEGIN
+    IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = '${DB_USER}') THEN
+        CREATE ROLE ${DB_USER} WITH LOGIN PASSWORD '${DB_PASSWORD}';
+    END IF;
+    ALTER ROLE ${DB_USER} WITH PASSWORD '${DB_PASSWORD}';
+END
+\$\$;
+GRANT ALL PRIVILEGES ON DATABASE ${DB_NAME} TO ${DB_USER};
+\c ${DB_NAME}
+GRANT USAGE ON SCHEMA public TO ${DB_USER};
+GRANT CREATE ON SCHEMA public TO ${DB_USER};
+ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO ${DB_USER};
+ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON SEQUENCES TO ${DB_USER};
+ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON FUNCTIONS TO ${DB_USER};
+ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TYPES TO ${DB_USER};
+GRANT ALL ON SCHEMA public TO ${DB_USER};
+GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO ${DB_USER};
+GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO ${DB_USER};
+GRANT ALL PRIVILEGES ON ALL FUNCTIONS IN SCHEMA public TO ${DB_USER};
+EOF
+
+    apply_schema_and_seed
+
+    echo ""
     echo "To connect to the database, use:"
     echo "psql -h localhost -U ${DB_USER} -d ${DB_NAME} -p ${DB_PORT}"
-    
-    # Check if connection info file exists
     if [ -f "db_connection.txt" ]; then
         echo "Or use: $(cat db_connection.txt)"
     fi
-    
     echo ""
-    echo "Script stopped - server already running."
+    echo "Script finished - server already running."
     exit 0
 fi
 
@@ -42,7 +91,8 @@ if pgrep -f "postgres.*-p ${DB_PORT}" > /dev/null 2>&1; then
     # Try to connect and verify the database exists
     if sudo -u postgres ${PG_BIN}/psql -p ${DB_PORT} -d ${DB_NAME} -c '\q' 2>/dev/null; then
         echo "Database ${DB_NAME} is accessible."
-        echo "Script stopped - server already running."
+        apply_schema_and_seed
+        echo "Script finished - server already running."
         exit 0
     fi
 fi
@@ -106,10 +156,6 @@ ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON SEQUENCES TO ${DB_USER};
 ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON FUNCTIONS TO ${DB_USER};
 ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TYPES TO ${DB_USER};
 
--- If you want the user to be able to create objects without restrictions,
--- you can make them the owner of the public schema (optional but effective)
--- ALTER SCHEMA public OWNER TO ${DB_USER};
-
 -- Alternative: Grant all privileges on schema public to the user
 GRANT ALL ON SCHEMA public TO ${DB_USER};
 
@@ -128,6 +174,9 @@ GRANT CREATE ON SCHEMA public TO ${DB_USER};
 -- Show current permissions for debugging
 \dn+ public
 EOF
+
+# Apply schema and seed
+apply_schema_and_seed
 
 # Save connection command to a file
 echo "psql postgresql://${DB_USER}:${DB_PASSWORD}@localhost:${DB_PORT}/${DB_NAME}" > db_connection.txt
