@@ -36,3 +36,15 @@ Notes:
 - The script tries to use system PostgreSQL binaries under /usr/lib/postgresql/<version>/bin.
 - The script is idempotent and can be rerun safely.
 - If PostgreSQL is already running on the configured port, it will not attempt to start another instance and will still re-ensure schema exists.
+- Recovery from unclean shutdowns is handled automatically: if a stale lock file postmaster.pid is found without an active postgres process, the script removes it and cleans up leftover socket files, then starts PostgreSQL.
+- If a different live postgres is detected using the same data directory, the script attempts a fast stop via pg_ctl. If it remains running, the script exits with diagnostics rather than risking data corruption.
+
+Manual remediation (if startup still fails):
+- Check listeners: ss -ltnp | grep :5001
+- Remove stale lock ONLY if no postgres is running for this data dir:
+  sudo -u postgres rm -f /var/lib/postgresql/data/postmaster.pid
+  sudo -u postgres rm -f /var/run/postgresql/.s.PGSQL.5001 /tmp/.s.PGSQL.5001
+- Start again:
+  bash startup.sh
+- View last server logs:
+  sudo tail -n 100 /var/lib/postgresql/data/startup.log
